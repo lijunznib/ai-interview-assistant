@@ -1,0 +1,90 @@
+name: Release Windows
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Validate release version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw 'The Git tag must match package.json version.'
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+      - run: npm ci
+      - run: npm test
+      - name: Build Windows x64 installer
+        run: npm run build:win
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify package contents
+        run: node scripts/verify-package.cjs
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.blockmap', '.yml' }
+          $lines = $files | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
+          $lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-release
+          if-no-files-found: error
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest.yml
+            dist/SHA256SUMS.txt
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-release
+          path: release
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: 截屏解题助手 ${{ needs.build.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Windows x64：下载 ai-interview-assistant-setup.exe，双击安装。
+            首次启动在设置中填写自己的 API Base URL、API Key 和支持图片的模型。
+            Ctrl+H 截图，Ctrl+Enter 提交，Ctrl+L 清空图片，Ctrl+B 隐藏/恢复。
+            安装包未做代码签名；SHA256SUMS.txt 提供下载校验。
+            使用与部署说明见仓库 README。许可证：CC BY-NC 4.0。
+          files: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+            release/SHA256SUMS.txt
